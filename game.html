@@ -43,6 +43,19 @@
   .hud .label { color: #888; font-size: 11px; }
   .hud .val { color: #ff3355; font-size: 22px; }
   .hud .dist { color: #ffcc33; font-size: 18px; }
+  .hud .best { color: #66ff99; font-size: 14px; }
+  .mute {
+    position: absolute;
+    top: 16px;
+    right: 16px;
+    background: rgba(0,0,0,0.5);
+    border: 1px solid #3a1a2a;
+    color: #eee;
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    cursor: pointer;
+    font-size: 16px;
+  }
   .overlay {
     position: absolute;
     inset: 0;
@@ -108,7 +121,10 @@
     <div class="dist" id="dist">0 m</div>
     <div><span class="label">CHASER</span></div>
     <div class="val" id="gap">— m behind</div>
+    <div><span class="label">BEST</span></div>
+    <div class="best" id="best">0 m</div>
   </div>
+  <button class="mute" id="muteBtn" title="Toggle sound">♪</button>
   <div class="overlay" id="overlay">
     <h1>MACHETE CHASE</h1>
     <h2>Run. Jump. Survive.</h2>
@@ -120,6 +136,8 @@
       &nbsp;&nbsp;
       <kbd>↓</kbd> to duck
     </div>
+    <p style="color:#66ff99; font-size: 13px;">Grab <span style="color:#ffcc33">golden lanterns</span> to widen the gap.</p>
+    <p style="color:#888; font-size: 11px;">Mobile: tap top to jump, bottom to duck</p>
     <button id="startBtn">START RUNNING</button>
   </div>
 </div>
@@ -135,6 +153,66 @@
   const startBtn = document.getElementById('startBtn');
   const distEl = document.getElementById('dist');
   const gapEl = document.getElementById('gap');
+  const bestEl = document.getElementById('best');
+  const muteBtn = document.getElementById('muteBtn');
+
+  // --- Audio ---
+  let audioCtx = null;
+  let muted = localStorage.getItem('mc_muted') === '1';
+  muteBtn.textContent = muted ? '♪̸' : '♪';
+  function audio() {
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    return audioCtx;
+  }
+  function beep({ freq = 440, type = 'sine', dur = 0.1, vol = 0.15, slide = 0, delay = 0 }) {
+    if (muted) return;
+    try {
+      const ac = audio();
+      const t0 = ac.currentTime + delay;
+      const osc = ac.createOscillator();
+      const g = ac.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freq, t0);
+      if (slide) osc.frequency.exponentialRampToValueAtTime(Math.max(20, freq + slide), t0 + dur);
+      g.gain.setValueAtTime(vol, t0);
+      g.gain.exponentialRampToValueAtTime(0.0001, t0 + dur);
+      osc.connect(g); g.connect(ac.destination);
+      osc.start(t0); osc.stop(t0 + dur + 0.02);
+    } catch (e) {}
+  }
+  function noise(dur = 0.2, vol = 0.2, filterFreq = 1000) {
+    if (muted) return;
+    try {
+      const ac = audio();
+      const buf = ac.createBuffer(1, ac.sampleRate * dur, ac.sampleRate);
+      const data = buf.getChannelData(0);
+      for (let i = 0; i < data.length; i++) data[i] = (Math.random() * 2 - 1) * (1 - i / data.length);
+      const src = ac.createBufferSource();
+      src.buffer = buf;
+      const filter = ac.createBiquadFilter();
+      filter.type = 'lowpass';
+      filter.frequency.value = filterFreq;
+      const g = ac.createGain();
+      g.gain.value = vol;
+      src.connect(filter); filter.connect(g); g.connect(ac.destination);
+      src.start();
+    } catch (e) {}
+  }
+  const sfx = {
+    jump:    () => beep({ freq: 520, type: 'square', dur: 0.12, vol: 0.1, slide: 200 }),
+    trip:    () => { noise(0.25, 0.3, 600); beep({ freq: 160, type: 'sawtooth', dur: 0.2, vol: 0.15, slide: -80 }); },
+    pickup:  () => { beep({ freq: 660, type: 'triangle', dur: 0.08, vol: 0.15 }); beep({ freq: 990, type: 'triangle', dur: 0.12, vol: 0.15, delay: 0.08 }); },
+    swing:   () => noise(0.15, 0.25, 3000),
+    stab:    () => { noise(0.3, 0.4, 400); beep({ freq: 110, type: 'sawtooth', dur: 0.3, vol: 0.2, slide: -60 }); },
+    death:   () => { beep({ freq: 200, type: 'sawtooth', dur: 0.8, vol: 0.25, slide: -180 }); },
+    thunder: () => noise(0.6, 0.15, 300),
+  };
+
+  muteBtn.addEventListener('click', () => {
+    muted = !muted;
+    localStorage.setItem('mc_muted', muted ? '1' : '0');
+    muteBtn.textContent = muted ? '♪̸' : '♪';
+  });
 
   const keys = { jump: false, duck: false };
   window.addEventListener('keydown', e => {
@@ -145,8 +223,14 @@
     if (e.code === 'Space' || e.code === 'ArrowUp') keys.jump = false;
     if (e.code === 'ArrowDown') keys.duck = false;
   });
-  cv.addEventListener('pointerdown', () => { keys.jump = true; });
-  cv.addEventListener('pointerup', () => { keys.jump = false; });
+  // Mobile: top half jump, bottom half duck
+  cv.addEventListener('pointerdown', e => {
+    const rect = cv.getBoundingClientRect();
+    const y = (e.clientY - rect.top) / rect.height;
+    if (y > 0.6) keys.duck = true; else keys.jump = true;
+  });
+  cv.addEventListener('pointerup', () => { keys.jump = false; keys.duck = false; });
+  cv.addEventListener('pointercancel', () => { keys.jump = false; keys.duck = false; });
 
   // Player
   const player = {
@@ -175,12 +259,20 @@
   let scroll = 0;           // total world distance (px)
   let worldSpeed = 6;       // base scroll speed
   let spawnTimer = 0;
+  let pickupTimer = 0;
   let obstacles = [];       // {x, w, h, type: 'log'|'rock'|'branch'}
+  let pickups = [];         // {x, y, taken, bob}
   let trees = [];           // parallax background
   let particles = [];
   let running = false;
   let distance = 0;
   let gap = 0;              // horizontal distance from chaser to player (in px)
+  let shake = 0;            // screen shake magnitude
+  let flash = 0;            // lightning flash (0..1)
+  let flashTimer = 180;     // frames until next lightning
+  let boostTimer = 0;       // pickup active frames
+  let highScore = parseInt(localStorage.getItem('mc_high') || '0', 10);
+  bestEl.textContent = highScore + ' m';
 
   function resetWorld() {
     player.x = 180; player.y = GROUND_Y; player.vy = 0;
@@ -189,10 +281,13 @@
     chaser.x = 40; chaser.y = GROUND_Y; chaser.swing = 0;
     scroll = 0; worldSpeed = 6;
     spawnTimer = 60;
+    pickupTimer = 200;
     obstacles = [];
+    pickups = [];
     trees = [];
     particles = [];
     distance = 0; gap = player.x - chaser.x;
+    shake = 0; flash = 0; flashTimer = 180; boostTimer = 0;
     for (let i = 0; i < 12; i++) trees.push({ x: Math.random() * W * 2, depth: 0.3 + Math.random() * 0.5, h: 80 + Math.random() * 80 });
   }
 
@@ -204,6 +299,40 @@
     else if (t === 'rock') o = { type: t, x: W + 40, w: 40, h: 36, y: GROUND_Y };
     else o = { type: t, x: W + 40, w: 80, h: 20, y: GROUND_Y - 52 }; // low branch - duck
     obstacles.push(o);
+  }
+
+  function spawnPickup() {
+    pickups.push({
+      x: W + 40,
+      y: GROUND_Y - 90 - Math.random() * 30,
+      taken: false,
+      bob: Math.random() * Math.PI * 2,
+    });
+  }
+
+  function drawPickup(p) {
+    if (p.taken) return;
+    const y = p.y + Math.sin(p.bob) * 4;
+    // Glow
+    const grad = ctx.createRadialGradient(p.x, y, 2, p.x, y, 28);
+    grad.addColorStop(0, 'rgba(255, 220, 80, 0.6)');
+    grad.addColorStop(1, 'rgba(255, 220, 80, 0)');
+    ctx.fillStyle = grad;
+    ctx.fillRect(p.x - 28, y - 28, 56, 56);
+    // Lantern body
+    ctx.fillStyle = '#ffcc33';
+    ctx.fillRect(p.x - 6, y - 8, 12, 14);
+    ctx.fillStyle = '#ffee88';
+    ctx.fillRect(p.x - 4, y - 6, 8, 10);
+    // Top cap
+    ctx.fillStyle = '#3a1a08';
+    ctx.fillRect(p.x - 8, y - 10, 16, 3);
+    // Handle
+    ctx.strokeStyle = '#3a1a08';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.arc(p.x, y - 12, 6, Math.PI, Math.PI * 2);
+    ctx.stroke();
   }
 
   // Drawing helpers
@@ -492,7 +621,11 @@
 
   function drawParticles() {
     for (const p of particles) {
-      ctx.fillStyle = `rgba(255, 20, 40, ${p.life / 60})`;
+      if (p.gold) {
+        ctx.fillStyle = `rgba(255, 220, 80, ${p.life / 40})`;
+      } else {
+        ctx.fillStyle = `rgba(255, 20, 40, ${p.life / 60})`;
+      }
       ctx.fillRect(p.x, p.y, p.size, p.size);
     }
   }
@@ -511,7 +644,14 @@
   }
 
   function loop() {
-    ctx.clearRect(0, 0, W, H);
+    // Screen shake offset
+    const sx = shake > 0 ? (Math.random() - 0.5) * shake : 0;
+    const sy = shake > 0 ? (Math.random() - 0.5) * shake : 0;
+    ctx.save();
+    ctx.translate(sx, sy);
+    if (shake > 0) shake *= 0.88;
+
+    ctx.clearRect(-20, -20, W + 40, H + 40);
     drawTrees();
     drawGround();
 
@@ -523,6 +663,7 @@
       if (keys.jump && player.onGround && !player.caught) {
         player.vy = -15;
         player.onGround = false;
+        sfx.jump();
       }
       player.ducking = keys.duck && player.onGround;
       player.vy += 0.9;
@@ -547,6 +688,41 @@
       for (const o of obstacles) o.x -= effectiveSpeed;
       obstacles = obstacles.filter(o => o.x + o.w > -40);
 
+      // Pickups
+      pickupTimer -= 1;
+      if (pickupTimer <= 0) {
+        spawnPickup();
+        pickupTimer = 350 + Math.random() * 300;
+      }
+      for (const p of pickups) {
+        p.x -= effectiveSpeed;
+        p.bob += 0.15;
+        if (!p.taken) {
+          const dx = p.x - player.x;
+          const dy = (p.y + Math.sin(p.bob) * 4) - (player.y - player.h / 2);
+          if (Math.abs(dx) < 22 && Math.abs(dy) < 28) {
+            p.taken = true;
+            boostTimer = 180;
+            chaser.x -= 120; // widen gap
+            sfx.pickup();
+            for (let i = 0; i < 15; i++) {
+              particles.push({ x: p.x, y: p.y, vx: (Math.random()-0.5)*6, vy: -Math.random()*5-1, life: 40, size: 2+Math.random()*2, gold: true });
+            }
+          }
+        }
+      }
+      pickups = pickups.filter(p => p.x > -40 && !p.taken);
+      if (boostTimer > 0) boostTimer--;
+
+      // Lightning
+      flashTimer--;
+      if (flashTimer <= 0) {
+        flash = 1;
+        flashTimer = 300 + Math.random() * 400;
+        sfx.thunder();
+      }
+      if (flash > 0) flash = Math.max(0, flash - 0.04);
+
       // Collision
       if (player.hurtTimer > 0) player.hurtTimer--;
       if (!player.caught) {
@@ -555,6 +731,8 @@
             player.hurtTimer = 30;
             // Push chaser closer — tripping lets him gain ground
             chaser.x += 50;
+            shake = 8;
+            sfx.trip();
             break;
           }
         }
@@ -577,13 +755,16 @@
       if (!player.caught && gap < 28) {
         player.caught = true;
         chaser.swing = 0;
+        sfx.swing();
+        shake = 14;
       }
 
       if (player.caught) {
         player.catchAnim++;
         chaser.swing = Math.sin(player.catchAnim * 0.4) * 0.8;
-        if (player.catchAnim === 20) spawnBlood(player.x, player.y - 30);
-        if (player.catchAnim === 45) spawnBlood(player.x, player.y - 20);
+        if (player.catchAnim === 20) { spawnBlood(player.x, player.y - 30); sfx.stab(); shake = 12; }
+        if (player.catchAnim === 45) { spawnBlood(player.x, player.y - 20); sfx.stab(); shake = 10; }
+        if (player.catchAnim === 60) sfx.death();
         if (player.catchAnim > 90) {
           running = false;
           gameOver();
@@ -593,13 +774,31 @@
       updateParticles();
     }
 
-    // Draw obstacles
+    // Draw obstacles & pickups
     for (const o of obstacles) drawObstacle(o);
+    for (const p of pickups) drawPickup(p);
 
     // Characters
     drawChaser();
     drawPlayer();
     drawParticles();
+
+    // Boost aura
+    if (boostTimer > 0) {
+      ctx.strokeStyle = `rgba(255, 220, 80, ${Math.min(1, boostTimer/60) * 0.6})`;
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.arc(player.x, player.y - player.h / 2, 30 + Math.sin(boostTimer * 0.3) * 3, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+
+    ctx.restore();
+
+    // Lightning overlay (not shaken)
+    if (flash > 0) {
+      ctx.fillStyle = `rgba(200, 220, 255, ${flash * 0.5})`;
+      ctx.fillRect(0, 0, W, H);
+    }
 
     // HUD
     distEl.textContent = Math.floor(distance) + ' m';
@@ -618,8 +817,17 @@
 
   function gameOver() {
     overlay.classList.remove('hidden');
+    const ran = Math.floor(distance);
+    const isNew = ran > highScore;
+    if (isNew) {
+      highScore = ran;
+      localStorage.setItem('mc_high', String(highScore));
+      bestEl.textContent = highScore + ' m';
+    }
     overlay.querySelector('h1').textContent = 'YOU DIED';
-    overlay.querySelector('h2').textContent = `You ran ${Math.floor(distance)} meters before he caught you.`;
+    overlay.querySelector('h2').innerHTML = isNew
+      ? `<span style="color:#66ff99">NEW BEST — ${ran} m</span>`
+      : `You ran ${ran} m. Best: ${highScore} m.`;
     startBtn.textContent = 'RUN AGAIN';
   }
 
